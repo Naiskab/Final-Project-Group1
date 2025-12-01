@@ -165,7 +165,7 @@ def resize_img(img, HW=(256, 256), resample=Image.BILINEAR):
     )
 
 
-def preprocess_img(img_rgb_orig, HW=(256, 256), resample=Image.BILINEAR, pretrained = True, return_ab = False):
+def preprocess_img(img_rgb_orig, HW=(256, 256), resample=Image.BILINEAR, return_ab = False):
     """
     Preprocess image into L_orig (original size) and L_rs (resized).
     Returns:
@@ -211,7 +211,7 @@ def preprocess_img(img_rgb_orig, HW=(256, 256), resample=Image.BILINEAR, pretrai
 
 
 
-def postprocess_tens(tens_orig_l, out_ab, mode='bilinear',pretrained = True):
+def postprocess_tens(tens_orig_l, out_ab, mode='bilinear'):
     """
     Combine predicted ab channels with original L channel and convert back to RGB.
     """
@@ -274,12 +274,12 @@ class ColorizationDataset(Dataset):
         if self.mode == 'training':
             # Get L and ab for training
             tens_l, tens_ab = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE),
-                                             pretrained=False, return_ab=True)
+                                              return_ab=True)
             return tens_l, tens_ab
         else:
             # Get L only for inference
             tens_orig_l, tens_rs_l = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE),
-                                                    pretrained=False, return_ab=False)
+                                                    return_ab=False)
             return tens_rs_l, tens_orig_l, img_path
 
         # Return:
@@ -334,6 +334,8 @@ def train_colorization_model(
         finetune=True,
         inference_count= 50
 ):
+
+
     """
     Training + inference pipeline.
     If finetune=False → skip training and run inference only.
@@ -344,7 +346,7 @@ def train_colorization_model(
     # TRAINING PHASE if finetune=True)
     # ------------------------------------------
     if finetune:
-        print(f"Finetune = True → Starting training for {EPOCHS} epochs...")
+        print(f"Finetune = True , Starting training for {EPOCHS} epochs...")
 
         train_dataset = ColorizationDataset(data_folder, mode='training', pretrained=False)
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
@@ -406,7 +408,7 @@ def train_colorization_model(
         print("Finetuned model saved as colorization_model_finetuned.pth")
 
     else:
-        print("Finetune = False → Skipping training. Running inference only.")
+        print("Finetune = False, Skipping training. Running inference only.")
 
     # ------------------------------------------
     # INFERENCE PHASE
@@ -473,6 +475,7 @@ if __name__ == "__main__":
         model,
         DATA_FOLDER,
         save_images=True,
+        finetune = True,
         output_folder=OUTPUT_FOLDER
     )
 
