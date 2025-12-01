@@ -18,7 +18,7 @@ from torch.utils.data import Dataset, DataLoader
 # ------------------------------------------------
 # Resize images to (256x256)
 IMAGE_SIZE = 256
-EPOCHS = 3
+EPOCHS = 1
 LR = 0.0001
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -326,81 +326,115 @@ def define_colorization_model(pretrained = True):
     pass
 
 
-def train_colorization_model(model, data_folder, save_images=False, output_folder="training_output"):
+def train_colorization_model(
+        model,
+        data_folder,
+        save_images=False,
+        output_folder="training_output",
+        finetune=True,
+        inference_count= 50
+):
     """
-    Training loop with optional image saving and final inference.
+    Training + inference pipeline.
+    If finetune=False → skip training and run inference only.
+    inference_count: number of random images to colorize.
     """
-    # Training phase
-    train_dataset = ColorizationDataset(data_folder, mode='training', pretrained=False)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    model.train()
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-    criterion = nn.MSELoss()
+    # ------------------------------------------
+    # TRAINING PHASE if finetune=True)
+    # ------------------------------------------
+    if finetune:
+        print(f"Finetune = True → Starting training for {EPOCHS} epochs...")
 
-    if save_images:
-        os.makedirs(output_folder, exist_ok=True)
+        train_dataset = ColorizationDataset(data_folder, mode='training', pretrained=False)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    print(f"Starting training for {EPOCHS} epochs...")
+        model.train()
+        optimizer = optim.Adam(model.parameters(), lr=LR)
+        criterion = nn.MSELoss()
 
-    for epoch in range(EPOCHS):
-        running_loss = 0.0
+        if save_images:
+            os.makedirs(output_folder, exist_ok=True)
 
-        for batch_idx, (tens_l, tens_ab_gt) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")):
-            tens_l = tens_l.to(DEVICE)
-            tens_ab_gt = tens_ab_gt.to(DEVICE)
+        for epoch in range(EPOCHS):
+            running_loss = 0.0
 
-            # Forward pass
-            optimizer.zero_grad()
-            predicted_ab = model(tens_l)
+            for batch_idx, (tens_l, tens_ab_gt) in enumerate(
+                    tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")
+            ):
+                tens_l = tens_l.to(DEVICE)
+                tens_ab_gt = tens_ab_gt.to(DEVICE)
 
-            # Compute loss
-            loss = criterion(predicted_ab, tens_ab_gt)
+                optimizer.zero_grad()
+                predicted_ab = model(tens_l)
+                loss = criterion(predicted_ab, tens_ab_gt)
+                loss.backward()
+                optimizer.step()
 
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+                if epoch == 0 and batch_idx == 0:
+                    print(
+                        f"predicted_ab stats: min={predicted_ab.min():.2f}, "
+                        f"max={predicted_ab.max():.2f}, mean={predicted_ab.mean():.2f}"
+                    )
+                    print(
+                        f"tens_ab_gt stats: min={tens_ab_gt.min():.2f}, "
+                        f"max={tens_ab_gt.max():.2f}, mean={tens_ab_gt.mean():.2f}"
+                    )
+                    print(f"Loss: {loss.item():.4f}")
 
-            # First batch, first epoch only:
-            if epoch == 0 and batch_idx == 0:
-                print(
-                    f"predicted_ab stats: min={predicted_ab.min():.2f}, max={predicted_ab.max():.2f}, mean={predicted_ab.mean():.2f}")
-                print(
-                    f"tens_ab_gt stats: min={tens_ab_gt.min():.2f}, max={tens_ab_gt.max():.2f}, mean={tens_ab_gt.mean():.2f}")
-                print(f"Loss: {loss.item():.4f}")
+                running_loss += loss.item()
 
-            running_loss += loss.item()
+                if save_images and batch_idx % 500 == 0:
+                    with torch.no_grad():
+                        for i in range(min(2, tens_l.shape[0])):
+                            orig_l = tens_l[i].cpu()
+                            pred_ab = predicted_ab[i].cpu()
+                            colorized_rgb = postprocess_tens(orig_l, pred_ab)
+                            save_path = os.path.join(
+                                output_folder,
+                                f"epoch{epoch + 1}_batch{batch_idx}_img{i}.png"
+                            )
+                            Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
 
-            # Save sample images during training
-            if save_images and batch_idx % 500 == 0:
-                with torch.no_grad():
-                    for i in range(min(2, tens_l.shape[0])):
-                        orig_l = tens_l[i].cpu()
-                        pred_ab = predicted_ab[i].cpu()
+            avg_loss = running_loss / len(train_loader)
+            print(f"Epoch [{epoch + 1}/{EPOCHS}] - Loss: {avg_loss:.4f}")
 
-                        colorized_rgb = postprocess_tens(orig_l, pred_ab, pretrained=False)
+        print("Training completed.")
 
-                        save_path = os.path.join(output_folder, f"epoch{epoch + 1}_batch{batch_idx}_img{i}.png")
-                        Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
+        # Save fine tuned weights
+        torch.save(model.state_dict(), 'colorization_model_finetuned.pth')
+        print("Finetuned model saved as colorization_model_finetuned.pth")
 
-        avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch + 1}/{EPOCHS}] - Loss: {avg_loss:.4f}")
+    else:
+        print("Finetune = False → Skipping training. Running inference only.")
 
-    print("Training completed")
+    # ------------------------------------------
+    # INFERENCE PHASE
+    # ------------------------------------------
+    print(f"\nStarting inference on: {data_folder}")
 
-    print(f"\nColorizing all images from {data_folder}...")
+    # Load full inference dataset
+    full_dataset = ColorizationDataset(data_folder, mode='inference', pretrained=False)
 
-    torch.save(model.state_dict(), 'colorization_model.pth')
-    print("Model saved to colorization_model.pth")
+    # Limit inference to N random images
+    if inference_count is not None:
+        print(f"Sampling {inference_count} random images for inference...")
+        indices = torch.randperm(len(full_dataset))[:inference_count]
+        inference_dataset = torch.utils.data.Subset(full_dataset, indices)
+    else:
+        inference_dataset = full_dataset
 
-
-    model.eval()
-    inference_dataset = ColorizationDataset(data_folder, mode='inference',pretrained=False)
-    inference_loader = DataLoader(inference_dataset, batch_size=4, shuffle=False, collate_fn=colorization_collate)
+    inference_loader = DataLoader(
+        inference_dataset,
+        batch_size=4,
+        shuffle=False,
+        collate_fn=colorization_collate
+    )
 
     final_output = output_folder + "_final"
     os.makedirs(final_output, exist_ok=True)
 
+    model.eval()
     with torch.no_grad():
         for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(inference_loader):
             tens_rs_l = tens_rs_l.to(DEVICE)
@@ -410,7 +444,7 @@ def train_colorization_model(model, data_folder, save_images=False, output_folde
                 pred_ab = predicted_ab[i].cpu()
                 orig_l = tens_orig_l[i]
 
-                colorized_rgb = postprocess_tens(orig_l, pred_ab, pretrained=False)
+                colorized_rgb = postprocess_tens(orig_l, pred_ab)
 
                 filename = os.path.basename(img_paths[i])
                 save_path = os.path.join(final_output, f"colorized_{filename}")
@@ -418,11 +452,9 @@ def train_colorization_model(model, data_folder, save_images=False, output_folde
 
             print(f"Batch {batch_idx + 1}/{len(inference_loader)} colorized")
 
-    print(f"All images saved to {final_output}/")
+    print(f"Saved {len(inference_dataset)} images → {final_output}")
 
     return model
-
-
 
 # ------------------------------------------------
 # MAIN BLOCK 
