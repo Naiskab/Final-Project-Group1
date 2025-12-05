@@ -31,6 +31,19 @@ LAMBDA_L1 = 1  # Weight for L1 loss
 D_STEPS = 1  # Discriminator steps per generator step
 LABEL_SMOOTHING = 0.1  # One-sided label smoothing for real images
 
+import csv
+import matplotlib.pyplot as plt
+
+# Create CSV file for logging
+def init_loss_log(filename='training_losses.csv'):
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Epoch', 'G_Loss', 'D_Loss', 'L1_Loss', 'GAN_Loss'])
+
+def log_losses(epoch, g_loss, d_loss, l1_loss, gan_loss, filename='training_losses.csv'):
+    with open(filename, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([epoch, g_loss, d_loss, l1_loss, gan_loss])
 
 # ------------------------------------------------
 # DEFINE UTIL FUNCTIONS
@@ -536,6 +549,7 @@ def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
     #         check_hash=True
     #     )
     # )
+    init_loss_log()
 
     if pretrained_path and os.path.exists(pretrained_path):
         print(f"Loading pretrained model from: {pretrained_path}")
@@ -630,6 +644,8 @@ def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
               f"D_loss: {epoch_d_loss / n_batches:.4f} | "
               f"L1_loss: {epoch_l1_loss / n_batches:.4f} | "
               f"GAN_loss: {epoch_gan_loss / n_batches:.4f}")
+        log_losses(epoch + 1, avg_g_loss, avg_d_loss, avg_l1_loss, avg_gan_loss)
+
 
         # Save ONE sample image per epoch
         save_sample_images(generator, val_loader, epoch + 1)
@@ -652,6 +668,49 @@ def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
 
     return generator, discriminator
 
+
+def plot_losses(csv_file='training_losses.csv', save_path='loss_plot.png'):
+    """Plot and save training losses"""
+    import pandas as pd
+
+    # Read CSV
+    df = pd.read_csv(csv_file)
+
+    # Create plot
+    plt.figure(figsize=(12, 8))
+
+    plt.subplot(2, 2, 1)
+    plt.plot(df['Epoch'], df['G_Loss'], 'b-', label='Generator Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Generator Loss')
+    plt.grid(True)
+
+    plt.subplot(2, 2, 2)
+    plt.plot(df['Epoch'], df['D_Loss'], 'r-', label='Discriminator Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Discriminator Loss')
+    plt.grid(True)
+
+    plt.subplot(2, 2, 3)
+    plt.plot(df['Epoch'], df['L1_Loss'], 'g-', label='L1 Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('L1 Loss')
+    plt.grid(True)
+
+    plt.subplot(2, 2, 4)
+    plt.plot(df['Epoch'], df['GAN_Loss'], 'm-', label='GAN Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('GAN Loss')
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f" Loss plot saved to {save_path}")
 
 def train_colorization_model(
         model,
@@ -729,8 +788,8 @@ def train_colorization_model(
         print("Training completed.")
 
         # Save fine tuned weights
-        torch.save(model.state_dict(), 'colorization_model_finetuned.pth')
-        print("Finetuned model saved as colorization_model_finetuned.pth")
+        # torch.save(model.state_dict(), 'colorization_model_finetuned.pth')
+        # print("Finetuned model saved as colorization_model_finetuned.pth")
 
     else:
         print("Finetune = False, Skipping training. Running inference only.")
@@ -788,22 +847,11 @@ def train_colorization_model(
 # MAIN BLOCK
 # ------------------------------------------------
 
+# ------------------------------------------------
+# MAIN BLOCK
+# ------------------------------------------------
+
 if __name__ == "__main__":
-    # Configuration
-    # DATA_FOLDER = "imagenet_50/train"  # Change this to your folder
-    # OUTPUT_FOLDER = "colorized_output"
-    #
-    # # Create model
-    # model = define_colorization_model(pretrained=True)
-    #
-    # # Train the model (already includes inference at the end)
-    # trained_model = train_colorization_model(
-    #     model,
-    #     DATA_FOLDER,
-    #     save_images=True,
-    #     finetune = True,
-    #     output_folder=OUTPUT_FOLDER
-    # )
     generator = ECCVGenerator()
     generator.to(DEVICE)
 
@@ -816,52 +864,19 @@ if __name__ == "__main__":
         save_interval=5
     )
 
-    # Save final model
-    torch.save(trained_gen.state_dict(), 'final_gan_generator.pth')
-    print("Saved final model: final_gan_generator.pth")
+    # Load BEST model for inference
+    print("\nLoading BEST model for inference...")
+    best_generator = ECCVGenerator()
+    best_generator.load_state_dict(torch.load('best_gan_generator.pth', map_location=DEVICE))
+    best_generator.to(DEVICE)
 
-    # Run inference on 50 images
-    print("RUNNING INFERENCE")
+    # Run inference with BEST model
+    print("RUNNING INFERENCE WITH BEST MODEL")
     run_inference(
-        generator=trained_gen,
+        generator=best_generator,
         data_folder="imagenet_50/train",
         output_folder="gan_colorized_output",
         num_images=50
     )
 
-    print("\nCOMPLETE!")
-
-    # dataset = ColorizationDataset(args.data_folder)
-    # loader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=colorization_collate)
-    #
-    # for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(loader):
-    #     tens_rs_l = tens_rs_l.to(DEVICE)
-    #
-    #     with torch.no_grad():
-    #         predicted_ab = model(tens_rs_l)
-    #
-    #     for i in range(len(img_paths)):
-    #         pred_ab = predicted_ab[i]
-    #         orig_l = tens_orig_l[i]
-    #         colorized_rgb = postprocess_tens(orig_l, pred_ab)
-    #
-    #         filename = os.path.basename(img_paths[i])
-    #         save_path = os.path.join(OUTPUT_FOLDER, f"colorized_{filename}")
-    #         Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
-    #
-    #     print(f"Batch {batch_idx + 1}/{len(loader)} done")
-    #
-    # print(f"\nAll {len(dataset)} images saved to {OUTPUT_FOLDER}/")
-
-#### Test the loader - keep this for now (just for me to check). ####
-# for tens_rs_l, tens_orig_l, img_paths in loader:
-#     print("\nBatch Loaded:")
-#     print("Resized L batch shape:", tens_rs_l.shape)  # (B, 1, 256, 256)
-#
-#     print("Original L shapes:")
-#     for i, t in enumerate(tens_orig_l):
-#         print(f"  Image {i}: {t.shape}")
-#
-#     print("Image paths:", img_paths)
-#     break
-
+    plot_losses('training_losses.csv', 'training_losses.png')
