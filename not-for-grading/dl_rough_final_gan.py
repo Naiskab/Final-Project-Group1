@@ -20,14 +20,14 @@ from torch.utils.data import Dataset, DataLoader
 # Resize images to (256x256)
 IMAGE_SIZE = 256
 # EPOCHS = 1
-EPOCHS = 50  # More epochs for GAN training
+EPOCHS = 5  # More epochs for GAN training
 LR_G = 0.0002  # Generator learning rate
-LR_D = 0.0002  # Discriminator learning rate (higher to help it keep up)
+LR_D = 0.0001  # Discriminator learning rate
 LR = 0.0001
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-LAMBDA_L1 = 1  # Weight for L1 loss
+LAMBDA_L1 = 10  # Weight for L1 loss
 D_STEPS = 1  # Discriminator steps per generator step
 LABEL_SMOOTHING = 0.1  # One-sided label smoothing for real images
 
@@ -496,15 +496,16 @@ def save_sample_images(generator, data_loader, epoch, save_dir="gan_samples"):
 
 def run_inference(generator, data_folder, output_folder="gan_inference", num_images=50):
     """
-    Run inference on 50 random images after training
+    Run inference on first num_images images after training
     """
-    print(f"\nStarting inference on {num_images} images...")
+    print(f"\nStarting inference on first {num_images} images...")
 
     # Load dataset
     full_dataset = ColorizationDataset(data_folder, mode='inference')
 
-    # Random sample
-    indices = torch.randperm(len(full_dataset))[:num_images]
+    # Take first num_images instead of random sample
+    num_images = min(num_images, len(full_dataset))  # Don't exceed dataset size
+    indices = list(range(num_images))  # First 50 images: [0, 1, 2, ..., 49]
     inference_dataset = torch.utils.data.Subset(full_dataset, indices)
 
     inference_loader = DataLoader(
@@ -532,8 +533,7 @@ def run_inference(generator, data_folder, output_folder="gan_inference", num_ima
                 save_path = os.path.join(output_folder, f"gan_{filename}")
                 Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
 
-        print(f"✓ Saved {num_images} images to {output_folder}/")
-
+        print(f"Saved {num_images} images to {output_folder}/")
 
 def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
     """
@@ -855,7 +855,7 @@ if __name__ == "__main__":
     generator = ECCVGenerator()
     generator.to(DEVICE)
 
-    # Train GAN
+    # # Train GAN
     print("STARTING GAN TRAINING")
     trained_gen, trained_disc = train_gan(
         generator=generator,
@@ -874,9 +874,42 @@ if __name__ == "__main__":
     print("RUNNING INFERENCE WITH BEST MODEL")
     run_inference(
         generator=best_generator,
-        data_folder="imagenet_50/train",
+        data_folder="imagenet_50/validation",
         output_folder="gan_colorized_output",
         num_images=50
     )
 
-    plot_losses('training_losses.csv', 'training_losses.png')
+    print("\n" + "=" * 60)
+    print("COMPARISON: Loading Zhang's pretrained model...")
+    print("=" * 60)
+
+    pretrained_gen = ECCVGenerator()
+    import torch.utils.model_zoo as model_zoo
+
+    pretrained_gen.load_state_dict(
+        model_zoo.load_url(
+            'https://colorizers.s3.us-east-2.amazonaws.com/colorization_release_v2-9b330a0b.pth',
+            map_location=DEVICE,
+            check_hash=True
+        )
+    )
+    pretrained_gen.to(DEVICE)
+
+    print("\nRunning inference with PRETRAINED model on validation...")
+    run_inference(
+        generator=pretrained_gen,
+        data_folder="imagenet_50/validation",  # Same validation folder
+        output_folder="pretrained_validation_output",
+        num_images=50
+    )
+
+    print("\n" + "=" * 60)
+    print("DONE! Check these folders:")
+    print("  - gan_validation_output/         (Your finetuned GAN)")
+    print("  - pretrained_validation_output/  (Zhang's original)")
+    print("=" * 60)
+
+    # Plot losses from training
+    # plot_losses('training_losses.csv', 'training_losses.png')
+
+    # plot_losses('training_losses.csv', 'training_losses.png')
