@@ -13,6 +13,8 @@ import torchvision.models as models
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
+from collections import defaultdict
 
 # ------------------------------------------------
 # CONFIG
@@ -20,10 +22,9 @@ from torch.utils.data import Dataset, DataLoader
 # Resize images to (256x256)
 IMAGE_SIZE = 256
 # EPOCHS = 1
-EPOCHS = 5  # More epochs for GAN training
+EPOCHS = 50  # More epochs for GAN training
 LR_G = 0.0002  # Generator learning rate
 LR_D = 0.0001  # Discriminator learning rate
-LR = 0.0001
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -312,50 +313,50 @@ def postprocess_tens(tens_orig_l, out_ab, mode='bilinear'):
 # ------------------------------------------------
 # DEFINE DATASET CLASS
 # ------------------------------------------------
-
 class ColorizationDataset(Dataset):
     """
-    Dataset for automatic colorization.
-    Loads images from folder, applies preprocessing,
-    returns (L_resized, L_original, img_path).
+    Dataset for automatic colorization using Hugging Face dataset
     """
 
-    def __init__(self, folder_path, pretrained=False, mode='inference'):
-        self.image_paths = []
-        self.pretrained = pretrained
+    def __init__(self, split='train', mode='training'):
+        """
+        Args:
+            split: 'train' or 'validation'
+            mode: 'training' or 'inference'
+        """
+        print(f"Loading HuggingFace dataset: split={split}, mode={mode}")
+        self.hf_dataset = load_dataset("Elriggs/imagenet-50-subset", split=split)
         self.mode = mode
-
-        for fname in os.listdir(folder_path):
-            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
-                self.image_paths.append(os.path.join(folder_path, fname))
-
-        self.image_paths.sort()
+        print(f"Loaded {len(self.hf_dataset)} images")
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.hf_dataset)
 
-    def __getitem__(self, index):
-        img_path = self.image_paths[index]
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
 
-        # Load image to numpy RGB
-        img_rgb_orig = load_img(img_path)
+        # Get PIL image and convert to RGB
+        img_pil = item['image'].convert('RGB')
+        img_rgb_orig = np.array(img_pil)
 
-        # Apply preprocessing
         if self.mode == 'training':
-            # Get L and ab for training
-            tens_l, tens_ab = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE),
-                                             return_ab=True)
-            return tens_l, tens_ab
+            # Training mode - return L and ab
+            img_rgb = np.array(img_pil.resize((IMAGE_SIZE, IMAGE_SIZE)))
+            img_lab = color.rgb2lab(img_rgb)
+
+            L = img_lab[:, :, 0]
+            ab = img_lab[:, :, 1:]
+
+            L_tensor = torch.FloatTensor(L).unsqueeze(0)
+            ab_tensor = torch.FloatTensor(ab).permute(2, 0, 1)
+
+            return L_tensor, ab_tensor
         else:
-            # Get L only for inference
+            # Inference mode - return L (resized and original) + label
             tens_orig_l, tens_rs_l = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE),
                                                     return_ab=False)
-            return tens_rs_l, tens_orig_l, img_path
-
-        # Return:
-        # - resized L (input for model)
-        # - original L (for reconstruction)
-        # - image path
+            label = item['label']
+            return tens_rs_l, tens_orig_l, label
 
 
 def colorization_collate(batch):
@@ -491,49 +492,100 @@ def save_sample_images(generator, data_loader, epoch, save_dir="gan_samples"):
             break  # Only process one batch
 
     generator.train()
-    print(f"✓ Saved sample image: {save_path}")
+    print(f"Saved sample image: {save_path}")
 
 
-def run_inference(generator, data_folder, output_folder="gan_inference", num_images=50):
+def get_stratified_indices(hf_dataset, images_per_class=10):
     """
-    Run inference on first num_images images after training
+    Get indices for N images per class
+
+    Args:
+        hf_dataset: HuggingFace dataset object
+        images_per_class: number of images to sample per class
+
+    Returns:
+        list of indices
     """
-    print(f"\nStarting inference on first {num_images} images...")
+    print(f"Selecting {images_per_class} images per class...")
+
+    # Group indices by class label
+    class_indices = defaultdict(list)
+    for idx in range(len(hf_dataset)):
+        label = hf_dataset[idx]['label']
+        class_indices[label].append(idx)
+
+    # Sample images_per_class from each class
+    selected_indices = []
+    for label in sorted(class_indices.keys()):
+        indices = class_indices[label]
+        # Take first N images from each class
+        sampled = indices[:images_per_class]
+        selected_indices.extend(sampled)
+        print(f"Class {label}: selected {len(sampled)} images")
+
+    print(f"Total selected: {len(selected_indices)} images")
+    return selected_indices
+
+
+def run_inference(generator, split='validation', output_folder="gan_inference", num_images=10):
+    """
+    Run inference on num_images per class from HuggingFace dataset
+
+    Args:
+        generator: trained generator model
+        split: 'train' or 'validation'
+        output_folder: where to save results
+        num_images: images per class (10 means 500 total for 50 classes)
+    """
+    print(f"INFERENCE: {num_images} images per class from {split} split")
 
     # Load dataset
-    full_dataset = ColorizationDataset(data_folder, mode='inference')
+    full_dataset = ColorizationDataset(split=split, mode='inference')
 
-    # Take first num_images instead of random sample
-    num_images = min(num_images, len(full_dataset))  # Don't exceed dataset size
-    indices = list(range(num_images))  # First 50 images: [0, 1, 2, ..., 49]
-    inference_dataset = torch.utils.data.Subset(full_dataset, indices)
+    # Get stratified indices
+    selected_indices = get_stratified_indices(full_dataset.hf_dataset, images_per_class=num_images)
+
+    # Create subset with selected indices
+    inference_dataset = torch.utils.data.Subset(full_dataset, selected_indices)
+
+    # Custom collate function for inference
+    def inference_collate(batch):
+        tens_rs_l = torch.stack([b[0] for b in batch], dim=0)
+        tens_orig_l = [b[1] for b in batch]
+        labels = [b[2] for b in batch]
+        return tens_rs_l, tens_orig_l, labels
 
     inference_loader = DataLoader(
         inference_dataset,
         batch_size=4,
         shuffle=False,
-        collate_fn=colorization_collate
+        collate_fn=inference_collate
     )
 
     os.makedirs(output_folder, exist_ok=True)
 
     generator.eval()
+    img_count = 0
+
     with torch.no_grad():
-        for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(inference_loader):
+        for batch_idx, (tens_rs_l, tens_orig_l_list, labels) in enumerate(inference_loader):
             tens_rs_l = tens_rs_l.to(DEVICE)
             predicted_ab = generator(tens_rs_l)
 
-            for i in range(len(img_paths)):
+            for i in range(len(labels)):
                 pred_ab = predicted_ab[i].cpu()
-                orig_l = tens_orig_l[i]
+                orig_l = tens_orig_l_list[i]
+                label = labels[i]
 
                 colorized_rgb = postprocess_tens(orig_l, pred_ab)
 
-                filename = os.path.basename(img_paths[i])
-                save_path = os.path.join(output_folder, f"gan_{filename}")
+                # Save with class label in filename
+                save_path = os.path.join(output_folder, f"class{label:03d}_img{img_count:04d}.png")
                 Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
+                img_count += 1
 
-        print(f"Saved {num_images} images to {output_folder}/")
+    print(f" Saved {img_count} images to {output_folder}/")
+
 
 def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
     """
@@ -855,33 +907,30 @@ if __name__ == "__main__":
     generator = ECCVGenerator()
     generator.to(DEVICE)
 
-    # # Train GAN
     print("STARTING GAN TRAINING")
     trained_gen, trained_disc = train_gan(
         generator=generator,
-        data_folder="imagenet_50/train",
+        data_folder="train",
         pretrained_path="colorization_model.pth",
         save_interval=5
     )
 
     # Load BEST model for inference
-    print("\nLoading BEST model for inference...")
+    print("\nLoading BEST model for inference")
     best_generator = ECCVGenerator()
     best_generator.load_state_dict(torch.load('best_gan_generator.pth', map_location=DEVICE))
     best_generator.to(DEVICE)
 
-    # Run inference with BEST model
-    print("RUNNING INFERENCE WITH BEST MODEL")
+    # Run inference with BEST model - 10 images per class
+    print("RUNNING INFERENCE WITH BEST FINETUNED MODEL")
     run_inference(
         generator=best_generator,
-        data_folder="imagenet_50/validation",
-        output_folder="gan_colorized_output",
-        num_images=50
+        split='validation',
+        output_folder="finetuned_gan_output",
+        num_images=10  # <-- 10 per class = 500 total
     )
 
-    print("\n" + "=" * 60)
     print("COMPARISON: Loading Zhang's pretrained model...")
-    print("=" * 60)
 
     pretrained_gen = ECCVGenerator()
     import torch.utils.model_zoo as model_zoo
@@ -898,18 +947,16 @@ if __name__ == "__main__":
     print("\nRunning inference with PRETRAINED model on validation...")
     run_inference(
         generator=pretrained_gen,
-        data_folder="imagenet_50/validation",  # Same validation folder
-        output_folder="pretrained_validation_output",
-        num_images=50
+        split='validation',
+        output_folder="pretrained_zhang_output",
+        num_images=10
     )
 
-    print("\n" + "=" * 60)
     print("DONE! Check these folders:")
-    print("  - gan_validation_output/         (Your finetuned GAN)")
-    print("  - pretrained_validation_output/  (Zhang's original)")
-    print("=" * 60)
-
+    print("  - finetuned_gan_output/      (Your finetuned GAN)")
+    print("  - pretrained_zhang_output/   (Zhang's original)")
+    print("  Each has 10 images per class (500 total)")
     # Plot losses from training
-    # plot_losses('training_losses.csv', 'training_losses.png')
+    plot_losses('training_losses.csv', 'training_losses.png')
 
     # plot_losses('training_losses.csv', 'training_losses.png')
