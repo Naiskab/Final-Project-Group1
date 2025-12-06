@@ -2,19 +2,33 @@ import streamlit as st
 import torch
 import numpy as np
 from PIL import Image
-from dl_proj_pretrained_gan import ECCVGenerator, preprocess_img, postprocess_tens
+from dl_rough_final_gan import ECCVGenerator, preprocess_img, postprocess_tens
+import torch.utils.model_zoo as model_zoo
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+PRETRAINED_URL = "https://colorizers.s3.us-east-2.amazonaws.com/colorization_release_v2-9b330a0b.pth"
 
 @st.cache_resource
-def load_model():
-    model = ECCVGenerator().to(DEVICE)
-    state = torch.load("best_gan_generator.pth", map_location=DEVICE)
-    model.load_state_dict(state)
-    model.eval()
-    return model
+def load_models():
+    # ------- pretrained model from URL -------
+    pretrained_gen = ECCVGenerator().to(DEVICE)
+    state_pre = model_zoo.load_url(
+        PRETRAINED_URL,
+        map_location=DEVICE,
+        check_hash=True
+    )
+    pretrained_gen.load_state_dict(state_pre)
+    pretrained_gen.eval()
 
-generator = load_model()
+    # ------- GAN generator -------
+    gan_gen = ECCVGenerator().to(DEVICE)
+    state_gan = torch.load("final_gan_generator.pth", map_location=DEVICE)
+    gan_gen.load_state_dict(state_gan)
+    gan_gen.eval()
+
+    return pretrained_gen, gan_gen
+
+pretrained_generator, gan_generator = load_models()
 
 st.title("Image Colorizer")
 
@@ -30,19 +44,30 @@ if uploaded_file is not None:
 
     # inference
     with torch.no_grad():
-        pred_ab = generator(tens_rs_l)[0].cpu()  # (2,H,W)
+        # pretrained model prediction
+        pred_ab_pre = pretrained_generator(tens_rs_l)[0].cpu()
+
+        # GAN fine-tuned model prediction
+        pred_ab_gan = gan_generator(tens_rs_l)[0].cpu()
 
     # postprocess
-    colorized = postprocess_tens(tens_orig_l, pred_ab)
-    colorized_img = (colorized * 255).astype(np.uint8)
+    colorized_pre = postprocess_tens(tens_orig_l, pred_ab_pre)
+    colorized_pre_img = (colorized_pre * 255).astype(np.uint8)
+
+    colorized_gan = postprocess_tens(tens_orig_l, pred_ab_gan)
+    colorized_gan_img = (colorized_gan * 255).astype(np.uint8)
 
     # display side by side
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.subheader("Input Image")
+        st.subheader("Ground Truth")
         st.image(img_np)
 
     with col2:
-        st.subheader("Colorized Output")
-        st.image(colorized_img)
+        st.subheader("Pretrained")
+        st.image(colorized_pre_img)
+
+    with col3:
+        st.subheader("Fine-tuned GAN")
+        st.image(colorized_gan_img)
