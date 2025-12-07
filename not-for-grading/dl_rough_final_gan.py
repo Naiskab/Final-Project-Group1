@@ -21,7 +21,6 @@ from collections import defaultdict
 # ------------------------------------------------
 # Resize images to (256x256)
 IMAGE_SIZE = 256
-# EPOCHS = 1
 EPOCHS = 50  # More epochs for GAN training
 LR_G = 0.0002  # Generator learning rate
 LR_D = 0.0001  # Discriminator learning rate
@@ -216,9 +215,11 @@ class PatchGANDiscriminator(nn.Module):
             *discriminator_block(in_channels, 64, normalize=False),  # 128x128
             *discriminator_block(64, 128),  # 64x64
             *discriminator_block(128, 256),  # 32x32
-            *discriminator_block(256, 512),  # 16x16
-            # Final layer - no stride
-            nn.Conv2d(512, 1, 4, padding=1)  # 30x30 output
+            nn.Conv2d(256, 512, 4, stride=1, padding=1, bias=False),  # 31x31
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(512, 1, 4, stride=1, padding=1)  # 30x30
         )
 
     def forward(self, img_L, img_ab):
@@ -371,31 +372,6 @@ def colorization_collate(batch):
     return tens_rs_l_batch, tens_orig_l_list, img_paths
 
 
-# ------------------------------------------------
-# DEFINE MODEL ARCHITECTURE & TRAINING LOOP
-# ------------------------------------------------
-
-def define_colorization_model(pretrained=True):
-    """
-    TODO:
-    - Build U-Net / encoder-decoder model
-    - Output: predicted ab channels (1,2,256,256)
-    """
-    model = ECCVGenerator()
-
-    if pretrained:
-        import torch.utils.model_zoo as model_zoo
-        model.load_state_dict(
-            model_zoo.load_url(
-                'https://colorizers.s3.us-east-2.amazonaws.com/colorization_release_v2-9b330a0b.pth',
-                map_location='cpu',
-                check_hash=True
-            )
-        )
-
-    model.to(DEVICE)
-    return model
-    pass
 
 
 def gan_loss(predictions, target_is_real, device):
@@ -764,140 +740,7 @@ def plot_losses(csv_file='training_losses.csv', save_path='loss_plot.png'):
     plt.close()
     print(f" Loss plot saved to {save_path}")
 
-def train_colorization_model(
-        model,
-        data_folder,
-        save_images=False,
-        output_folder="training_output",
-        finetune=True,
-        inference_count=50
-):
-    """
-    Training + inference pipeline.
-    If finetune=False → skip training and run inference only.
-    inference_count: number of random images to colorize.
-    """
 
-    # ------------------------------------------
-    # TRAINING PHASE if finetune=True)
-    # ------------------------------------------
-    if finetune:
-        print(f"Finetune = True , Starting training for {EPOCHS} epochs...")
-
-        train_dataset = ColorizationDataset(data_folder, mode='training', pretrained=False)
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-        model.train()
-        optimizer = optim.Adam(model.parameters(), lr=LR)
-        criterion = nn.MSELoss()
-
-        if save_images:
-            os.makedirs(output_folder, exist_ok=True)
-
-        for epoch in range(EPOCHS):
-            running_loss = 0.0
-
-            for batch_idx, (tens_l, tens_ab_gt) in enumerate(
-                    tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")
-            ):
-                tens_l = tens_l.to(DEVICE)
-                tens_ab_gt = tens_ab_gt.to(DEVICE)
-
-                optimizer.zero_grad()
-                predicted_ab = model(tens_l)
-                loss = criterion(predicted_ab, tens_ab_gt)
-                loss.backward()
-                optimizer.step()
-
-                if epoch == 0 and batch_idx == 0:
-                    print(
-                        f"predicted_ab stats: min={predicted_ab.min():.2f}, "
-                        f"max={predicted_ab.max():.2f}, mean={predicted_ab.mean():.2f}"
-                    )
-                    print(
-                        f"tens_ab_gt stats: min={tens_ab_gt.min():.2f}, "
-                        f"max={tens_ab_gt.max():.2f}, mean={tens_ab_gt.mean():.2f}"
-                    )
-                    print(f"Loss: {loss.item():.4f}")
-
-                running_loss += loss.item()
-
-                if save_images and batch_idx % 500 == 0:
-                    with torch.no_grad():
-                        for i in range(min(2, tens_l.shape[0])):
-                            orig_l = tens_l[i].cpu()
-                            pred_ab = predicted_ab[i].cpu()
-                            colorized_rgb = postprocess_tens(orig_l, pred_ab)
-                            save_path = os.path.join(
-                                output_folder,
-                                f"epoch{epoch + 1}_batch{batch_idx}_img{i}.png"
-                            )
-                            Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
-
-            avg_loss = running_loss / len(train_loader)
-            print(f"Epoch [{epoch + 1}/{EPOCHS}] - Loss: {avg_loss:.4f}")
-
-        print("Training completed.")
-
-        # Save fine tuned weights
-        # torch.save(model.state_dict(), 'colorization_model_finetuned.pth')
-        # print("Finetuned model saved as colorization_model_finetuned.pth")
-
-    else:
-        print("Finetune = False, Skipping training. Running inference only.")
-
-    # ------------------------------------------
-    # INFERENCE PHASE
-    # ------------------------------------------
-    print(f"\nStarting inference on: {data_folder}")
-
-    # Load full inference dataset
-    full_dataset = ColorizationDataset(data_folder, mode='inference', pretrained=False)
-
-    # Limit inference to N random images
-    if inference_count is not None:
-        print(f"Sampling {inference_count} random images for inference...")
-        indices = torch.randperm(len(full_dataset))[:inference_count]
-        inference_dataset = torch.utils.data.Subset(full_dataset, indices)
-    else:
-        inference_dataset = full_dataset
-
-    inference_loader = DataLoader(
-        inference_dataset,
-        batch_size=4,
-        shuffle=False,
-        collate_fn=colorization_collate
-    )
-
-    final_output = output_folder + "_final"
-    os.makedirs(final_output, exist_ok=True)
-
-    model.eval()
-    with torch.no_grad():
-        for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(inference_loader):
-            tens_rs_l = tens_rs_l.to(DEVICE)
-            predicted_ab = model(tens_rs_l)
-
-            for i in range(len(img_paths)):
-                pred_ab = predicted_ab[i].cpu()
-                orig_l = tens_orig_l[i]
-
-                colorized_rgb = postprocess_tens(orig_l, pred_ab)
-
-                filename = os.path.basename(img_paths[i])
-                save_path = os.path.join(final_output, f"colorized_{filename}")
-                Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
-
-            print(f"Batch {batch_idx + 1}/{len(inference_loader)} colorized")
-
-    print(f"Saved {len(inference_dataset)} images → {final_output}")
-
-    return model
-
-
-# ------------------------------------------------
-# MAIN BLOCK
-# ------------------------------------------------
 
 # ------------------------------------------------
 # MAIN BLOCK
@@ -959,4 +802,3 @@ if __name__ == "__main__":
     # Plot losses from training
     plot_losses('training_losses.csv', 'training_losses.png')
 
-    # plot_losses('training_losses.csv', 'training_losses.png')
