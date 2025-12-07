@@ -19,17 +19,10 @@ from torch.utils.data import Dataset, DataLoader
 # Resize images to (256x256)
 IMAGE_SIZE = 256
 # EPOCHS = 1
-EPOCHS = 5  # More epochs for GAN training
-LR_G = 0.0002  # Generator learning rate
-LR_D = 0.00001  # Discriminator learning rate (higher to help it keep up)
-LR = 0.0001
+EPOCHS = 3  # More epochs for GAN training
+LR = 0.00001
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-LAMBDA_L1 = 10  # Weight for L1 loss
-D_STEPS = 3  # Discriminator steps per generator step
-LABEL_SMOOTHING = 0.1  # One-sided label smoothing for real images
-
 # ------------------------------------------------
 # DEFINE UTIL FUNCTIONS 
 # ------------------------------------------------
@@ -164,36 +157,6 @@ class ECCVGenerator(BaseColor):
         return self.unnormalize_ab(self.upsample4(out_reg))
 
 
-class PatchGANDiscriminator(nn.Module):
-    """
-    PatchGAN discriminator for 70x70 patches
-    Input: L channel (1) + ab channels (2) = 3 channels
-    """
-
-    def __init__(self, in_channels=3):
-        super(PatchGANDiscriminator, self).__init__()
-
-        def discriminator_block(in_feat, out_feat, normalize=True):
-            layers = [nn.Conv2d(in_feat, out_feat, 4, stride=2, padding=1)]
-            if normalize:
-                layers.append(nn.BatchNorm2d(out_feat))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
-            return layers
-
-        self.model = nn.Sequential(
-            # No norm in first layer
-            *discriminator_block(in_channels, 64, normalize=False),  # 128x128
-            *discriminator_block(64, 128),  # 64x64
-            *discriminator_block(128, 256),  # 32x32
-            *discriminator_block(256, 512),  # 16x16
-            # Final layer - no stride
-            nn.Conv2d(512, 1, 4, padding=1)  # 30x30 output
-        )
-
-    def forward(self, img_L, img_ab):
-        # Concatenate L and ab channels
-        img_input = torch.cat([img_L, img_ab], dim=1)
-        return self.model(img_input)
 
 def resize_img(img, HW=(256, 256), resample=Image.BILINEAR):
     """
@@ -226,23 +189,9 @@ def preprocess_img(img_rgb_orig, HW=(256, 256), resample=Image.BILINEAR, return_
     tens_orig_l = torch.tensor(img_l_orig, dtype=torch.float32)[None, :, :]
     tens_rs_l   = torch.tensor(img_l_rs,   dtype=torch.float32)[None, :, :]
 
-    #### Normalize L channel (paper recommends dividing by 100) -> I will look into this again(for now, lets have this) ####
-    # tens_orig_l = tens_orig_l / 100.0
-    # tens_rs_l   = tens_rs_l / 100.0
-
-    # If pretrained is not True then we could center and Normalise the images
-    # if pretrained == False:
-    #     normalizer = BaseColor()
-    #     tens_orig_l = normalizer.normalize_l(tens_orig_l)
-    #     tens_rs_l   = normalizer.normalize_l(tens_rs_l)
-
     if return_ab:
         img_ab_rs = img_lab_rs[:, :, 1:]
         tens_ab = torch.tensor(img_ab_rs, dtype=torch.float32).permute(2, 0, 1)
-        # tens_ab = normalizer.normalize_ab(tens_ab)
-
-        # if not pretrained:
-        #     tens_ab = normalizer.normalize_ab(tens_ab)
 
         return tens_rs_l, tens_ab
 
@@ -263,14 +212,6 @@ def postprocess_tens(tens_orig_l, out_ab, mode='bilinear'):
         out_ab = F.interpolate(out_ab.unsqueeze(0), 
                                size=HW_orig, mode='bilinear')[0]
 
-    # if not pretrained:
-    #     normalizer = BaseColor()
-    #     tens_orig_l = normalizer.unnormalize_l(tens_orig_l)
-        # out_ab = normalizer.unnormalize_ab(out_ab)
-
-
-    # tens_orig_l: (1, H_orig, W_orig)
-    # out_ab:      (2, H_orig, W_orig)
 
     out_lab = torch.cat((tens_orig_l, out_ab), dim=0)  # (3, H_orig, W_orig)
 
@@ -364,241 +305,6 @@ def define_colorization_model(pretrained = True):
     return model
     pass
 
-
-def gan_loss(predictions, target_is_real, device):
-    """
-    GAN loss with label smoothing
-    """
-    if target_is_real:
-        # Real labels with smoothing: 0.9 instead of 1.0
-        target = torch.ones_like(predictions) * 0.9
-    else:
-        # Fake labels: 0.0
-        target = torch.zeros_like(predictions)
-
-    loss = F.binary_cross_entropy_with_logits(predictions, target)
-    return loss
-
-
-def calculate_losses(generator, discriminator, real_L, real_ab, device):
-    """
-    Calculate all losses for one batch
-    Returns: g_loss, d_loss, l1_loss
-    """
-    batch_size = real_L.size(0)
-
-    # Generate fake ab channels
-    fake_ab = generator(real_L)
-
-    # ===== DISCRIMINATOR LOSS =====
-    # Real images
-    d_real = discriminator(real_L, real_ab)
-    d_loss_real = gan_loss(d_real, True, device)
-
-    # Fake images (detach to not train generator)
-    d_fake = discriminator(real_L, fake_ab.detach())
-    d_loss_fake = gan_loss(d_fake, False, device)
-
-    # Total discriminator loss
-    d_loss = (d_loss_real + d_loss_fake) * 0.5
-
-    # ===== GENERATOR LOSS =====
-    # Adversarial loss (try to fool discriminator)
-    d_fake_for_g = discriminator(real_L, fake_ab)
-    g_loss_gan = gan_loss(d_fake_for_g, True, device)
-
-    # L1 loss (pixel-wise accuracy)
-    l1_loss = F.l1_loss(fake_ab, real_ab)
-
-    # Combined generator loss
-    g_loss = g_loss_gan + LAMBDA_L1 * l1_loss
-
-    return g_loss, d_loss, l1_loss, g_loss_gan
-
-
-def save_sample_images(generator, data_loader, epoch, save_dir="gan_samples"):
-    """
-    Save ONE sample image per epoch to monitor progress
-    """
-    os.makedirs(save_dir, exist_ok=True)
-
-    generator.eval()
-    with torch.no_grad():
-        # Get one batch
-        for tens_l, tens_ab in data_loader:
-            tens_l = tens_l.to(DEVICE)
-            tens_ab = tens_ab.to(DEVICE)
-
-            # Generate fake colors
-            fake_ab = generator(tens_l)
-
-            # Save ONLY first image
-            l_channel = tens_l[0].cpu()
-            real_ab = tens_ab[0].cpu()
-            pred_ab = fake_ab[0].cpu()
-
-            # Create side-by-side comparison
-            gray_rgb = postprocess_tens(l_channel, torch.zeros_like(real_ab))
-            real_rgb = postprocess_tens(l_channel, real_ab)
-            fake_rgb = postprocess_tens(l_channel, pred_ab)
-
-            # Concatenate horizontally
-            comparison = np.concatenate([gray_rgb, real_rgb, fake_rgb], axis=1)
-
-            # Save
-            save_path = os.path.join(save_dir, f"epoch_{epoch}.png")
-            Image.fromarray((comparison * 255).astype(np.uint8)).save(save_path)
-
-            break  # Only process one batch
-
-    generator.train()
-    print(f"✓ Saved sample image: {save_path}")
-
-
-def run_inference(generator, data_folder, output_folder="gan_inference", num_images=50):
-    """
-    Run inference on 50 random images after training
-    """
-    print(f"\nStarting inference on {num_images} images...")
-
-    # Load dataset
-    full_dataset = ColorizationDataset(data_folder, mode='inference')
-
-    # Random sample
-    indices = torch.randperm(len(full_dataset))[:num_images]
-    inference_dataset = torch.utils.data.Subset(full_dataset, indices)
-
-    inference_loader = DataLoader(
-        inference_dataset,
-        batch_size=4,
-        shuffle=False,
-        collate_fn=colorization_collate
-    )
-
-    os.makedirs(output_folder, exist_ok=True)
-
-    generator.eval()
-    with torch.no_grad():
-        for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(inference_loader):
-            tens_rs_l = tens_rs_l.to(DEVICE)
-            predicted_ab = generator(tens_rs_l)
-
-            for i in range(len(img_paths)):
-                pred_ab = predicted_ab[i].cpu()
-                orig_l = tens_orig_l[i]
-
-                colorized_rgb = postprocess_tens(orig_l, pred_ab)
-
-                filename = os.path.basename(img_paths[i])
-                save_path = os.path.join(output_folder, f"gan_{filename}")
-                Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
-
-        print(f"✓ Saved {num_images} images to {output_folder}/")
-
-
-def train_gan(generator, data_folder, pretrained_path=None, save_interval=5):
-    """
-    Train GAN with pretrained ECCV generator
-    """
-    # Load pretrained weights if provided
-    print("Loading Zhang pretrained model (original)...")
-    import torch.utils.model_zoo as model_zoo
-    generator.load_state_dict(
-        model_zoo.load_url(
-            'https://colorizers.s3.us-east-2.amazonaws.com/colorization_release_v2-9b330a0b.pth',
-            map_location=DEVICE,
-            check_hash=True
-        )
-    )
-
-    # Initialize discriminator
-    discriminator = PatchGANDiscriminator().to(DEVICE)
-
-    # Optimizers
-    optimizer_G = optim.Adam(generator.parameters(), lr=LR_G, betas=(0.5, 0.999))
-    optimizer_D = optim.Adam(discriminator.parameters(), lr=LR_D, betas=(0.5, 0.999))
-
-    # Dataset
-    train_dataset = ColorizationDataset(data_folder, mode='training')
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
-                              shuffle=True, num_workers=4, pin_memory=True)
-
-    # Fixed validation sample (same image every epoch)
-    val_dataset = ColorizationDataset(data_folder, mode='training')
-    val_subset = torch.utils.data.Subset(val_dataset, [0])  # Just first image
-    val_loader = DataLoader(val_subset, batch_size=1, shuffle=False)
-
-    # Training loop
-    for epoch in range(EPOCHS):
-        generator.train()
-        discriminator.train()
-
-        epoch_g_loss = 0
-        epoch_d_loss = 0
-        epoch_l1_loss = 0
-        epoch_gan_loss = 0
-
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")
-
-        for batch_idx, (tens_l, tens_ab) in enumerate(pbar):
-            tens_l = tens_l.to(DEVICE)
-            tens_ab = tens_ab.to(DEVICE)
-
-            # Calculate losses
-            g_loss, d_loss, l1_loss, g_gan_loss = calculate_losses(
-                generator, discriminator, tens_l, tens_ab, DEVICE
-            )
-
-            # ===== UPDATE DISCRIMINATOR =====
-            optimizer_D.zero_grad()
-            d_loss.backward()
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
-            optimizer_D.step()
-
-            # ===== UPDATE GENERATOR =====
-            if batch_idx % D_STEPS == 0:
-                optimizer_G.zero_grad()
-                g_loss, _, l1_loss, g_gan_loss = calculate_losses(
-                    generator, discriminator, tens_l, tens_ab, DEVICE
-                )
-                g_loss.backward()
-                torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
-                optimizer_G.step()
-
-            # Track losses
-            epoch_g_loss += g_loss.item()
-            epoch_d_loss += d_loss.item()
-            epoch_l1_loss += l1_loss.item()
-            epoch_gan_loss += g_gan_loss.item()
-
-            # Update progress bar
-            pbar.set_postfix({
-                'G_loss': f'{g_loss.item():.3f}',
-                'D_loss': f'{d_loss.item():.3f}',
-                'L1': f'{l1_loss.item():.3f}',
-                'GAN': f'{g_gan_loss.item():.3f}'
-            })
-
-        # Epoch summary
-        n_batches = len(train_loader)
-        print(f"\n[Epoch {epoch + 1}] "
-              f"G_loss: {epoch_g_loss / n_batches:.4f} | "
-              f"D_loss: {epoch_d_loss / n_batches:.4f} | "
-              f"L1_loss: {epoch_l1_loss / n_batches:.4f} | "
-              f"GAN_loss: {epoch_gan_loss / n_batches:.4f}")
-
-        # Save ONE sample image per epoch
-        save_sample_images(generator, val_loader, epoch + 1)
-
-        # Save checkpoints
-        if (epoch + 1) % save_interval == 0:
-            torch.save(generator.state_dict(),
-                       f'gan_generator_epoch_{epoch + 1}.pth')
-            torch.save(discriminator.state_dict(),
-                       f'gan_discriminator_epoch_{epoch + 1}.pth')
-            print(f"Saved checkpoint at epoch {epoch + 1}")
-
-    return generator, discriminator
 
 def train_colorization_model(
         model,
@@ -737,79 +443,18 @@ def train_colorization_model(
 # ------------------------------------------------
 
 if __name__ == "__main__":
-    # Configuration
-    # DATA_FOLDER = "imagenet_50/train"  # Change this to your folder
-    # OUTPUT_FOLDER = "colorized_output"
-    #
-    # # Create model
-    # model = define_colorization_model(pretrained=True)
-    #
-    # # Train the model (already includes inference at the end)
-    # trained_model = train_colorization_model(
-    #     model,
-    #     DATA_FOLDER,
-    #     save_images=True,
-    #     finetune = True,
-    #     output_folder=OUTPUT_FOLDER
-    # )
-    generator = ECCVGenerator()
-    generator.to(DEVICE)
+    #Configuration
+    DATA_FOLDER = "imagenet_50/train"  # Change this to your folder
+    OUTPUT_FOLDER = "colorized_output"
 
-    # Train GAN
-    print("STARTING GAN TRAINING")
-    trained_gen, trained_disc = train_gan(
-        generator=generator,
-        data_folder="imagenet_50/train",
-        pretrained_path=None,
-        save_interval=5
+    # Create model
+    model = define_colorization_model(pretrained=True)
+
+    # Train the model (already includes inference at the end)
+    trained_model = train_colorization_model(
+        model,
+        DATA_FOLDER,
+        save_images=True,
+        finetune = True,
+        output_folder=OUTPUT_FOLDER
     )
-
-    # Save final model
-    torch.save(trained_gen.state_dict(), 'final_gan_generator.pth')
-    print("Saved final model: final_gan_generator.pth")
-
-    # Run inference on 50 images
-    print("RUNNING INFERENCE")
-    run_inference(
-        generator=trained_gen,
-        data_folder="imagenet_50/train",
-        output_folder="gan_colorized_output",
-        num_images=50
-    )
-
-    print("\nCOMPLETE!")
-
-    # dataset = ColorizationDataset(args.data_folder)
-    # loader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=colorization_collate)
-    #
-    # for batch_idx, (tens_rs_l, tens_orig_l, img_paths) in enumerate(loader):
-    #     tens_rs_l = tens_rs_l.to(DEVICE)
-    #
-    #     with torch.no_grad():
-    #         predicted_ab = model(tens_rs_l)
-    #
-    #     for i in range(len(img_paths)):
-    #         pred_ab = predicted_ab[i]
-    #         orig_l = tens_orig_l[i]
-    #         colorized_rgb = postprocess_tens(orig_l, pred_ab)
-    #
-    #         filename = os.path.basename(img_paths[i])
-    #         save_path = os.path.join(OUTPUT_FOLDER, f"colorized_{filename}")
-    #         Image.fromarray((colorized_rgb * 255).astype(np.uint8)).save(save_path)
-    #
-    #     print(f"Batch {batch_idx + 1}/{len(loader)} done")
-    #
-    # print(f"\nAll {len(dataset)} images saved to {OUTPUT_FOLDER}/")
-
-#### Test the loader - keep this for now (just for me to check). ####
-# for tens_rs_l, tens_orig_l, img_paths in loader:
-#     print("\nBatch Loaded:")
-#     print("Resized L batch shape:", tens_rs_l.shape)  # (B, 1, 256, 256)
-#
-#     print("Original L shapes:")
-#     for i, t in enumerate(tens_orig_l):
-#         print(f"  Image {i}: {t.shape}")
-#
-#     print("Image paths:", img_paths)
-#     break
-
