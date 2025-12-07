@@ -30,6 +30,7 @@ def load_models():
 
 pretrained_generator, gan_generator = load_models()
 
+st.set_page_config(layout="wide")
 st.title("Image Colorizer")
 
 uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
