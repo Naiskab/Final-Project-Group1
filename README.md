@@ -14,17 +14,6 @@ The George Washington University
 ## Project Summary
 This project investigates whether GAN-based fine-tuning improves perceptual quality in image colorization tasks. Beginning with the ECCV-2016 colorization architecture, we extend the method using adversarial discriminators and VGG-based perceptual loss. We evaluate results using multiple metrics (AUC, PSNR, SSIM, perceptual loss) and visual inspection.
 
-
-## Repository Overview
-Final-Project-Group1/ <br>
-│ <br>
-├── Code/   <br>
-├── Final-Group-Presentation/ <br>
-├── Final-Group-Project-Report/ <br>
-├── Final-Individual-Reports/ <br>
-├── Group-Proposal/ <br>
-└── README.md <br>
-
 ## Important Note
 Instructions for running, training, and evaluating the models are documented separately inside:
 Code/README.md
