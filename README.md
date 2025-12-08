@@ -8,7 +8,7 @@ The George Washington University
 
 ## Contributors
 - Naiska Buyandalai
-- Sneha Tadapaneni
+- Snehitha Tadapaneni
 - Sairachana Kandikattu
 
 ## Approach and Implementation
