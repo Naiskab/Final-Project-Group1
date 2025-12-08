@@ -25,7 +25,7 @@ Code/README.md
 - L1 reconstruction loss
 - Combined adversarial and perceptual optimization
 
-## Model Inference and Demo
+## Demo
 A Streamlit application is included for demonstration. The app performs inference using both:
 
 1. the original ECCV-16 pretrained model
