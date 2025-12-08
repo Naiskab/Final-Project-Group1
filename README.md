@@ -21,15 +21,13 @@ Two complementary training pipelines were implemented:
 
 2. Fine-tuned GAN model – trained adversarially using HF ImageNet-50
 
-Results Summary
+## Results Summary
 
 Evaluations were made by multiple metrics, including AUC error in ab-space, PSNR and SSIM in RGB reconstruction space. Across validation testing, adversarially fine-tuned models produced subtle numerical improvements while achieving noticeably stronger perceptual quality.
 
 Qualitative visualization demonstrates more vivid color saturation and reduced grayish artifacts.
 
-
-
-
+![Alt text](sample.png)
 
 ## Important Note
 Instructions for running, training, and evaluating the models are documented separately inside:
