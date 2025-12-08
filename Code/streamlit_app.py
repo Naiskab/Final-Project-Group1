@@ -22,7 +22,7 @@ def load_models():
 
     # fine-tuned GAN generator
     gan_gen = ECCVGenerator().to(DEVICE)
-    state_gan = torch.load("best_gan_generator.pth.pth", map_location=DEVICE)
+    state_gan = torch.load("best_gan_generator.pth", map_location=DEVICE)
     gan_gen.load_state_dict(state_gan)
     gan_gen.eval()
 
