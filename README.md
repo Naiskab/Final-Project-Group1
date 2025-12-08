@@ -27,9 +27,7 @@ Evaluations were made by multiple metrics, including AUC error in ab-space, PSNR
 
 Qualitative visualization demonstrates more vivid color saturation and reduced grayish artifacts.
 
-
-
-
+![Alt text](sample.png)
 
 ## Important Note
 Instructions for running, training, and evaluating the models are documented separately inside:
