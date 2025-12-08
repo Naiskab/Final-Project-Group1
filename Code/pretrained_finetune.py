@@ -28,7 +28,7 @@ LR = 0.00005                  # 5e-5 (fine-tuning learning rate)
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-FINETUNED_MODEL_PATH = "colorization_model_finetuned_ce.pth"
+FINETUNED_MODEL_PATH = "colorization_model.pth"
 
 PTS_IN_HULL_PATH = "pts_in_hull.npy"
 PTS_IN_HULL_URLS = [
@@ -317,7 +317,7 @@ def compute_class_weights(split, pts_ab, max_batches=None):
     weights = 1.0 / (prob + eps)
     weights /= weights.mean()
 
-    print("Done computing class weights.\n")
+
     return weights.to(DEVICE)
 
 
@@ -401,7 +401,6 @@ def train_colorization_model_classification(
                 break
         model.train()
 
-    print("Finished fine-tuning.\n")
     return model
 
 
@@ -501,4 +500,3 @@ if __name__ == "__main__":
         num_images=10
     )
 
-    print("DONE. Check folders: pretrained_output/ and finetuned_output/")
