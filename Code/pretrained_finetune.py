@@ -1,7 +1,6 @@
 # ================================================================
 # COLORIZATION OF GRAYSCALE IMAGES USING DEEP NEURAL NETWORKS
 # ECCV16-STYLE CLASSIFICATION FINE-TUNING (313 BINS + REBALANCED CE)
-# Uses HuggingFace "Elriggs/imagenet-50-subset" (no local data folders)
 # ================================================================
 
 import os
@@ -177,7 +176,7 @@ def postprocess_tens(tens_orig_l, out_ab):
 
 
 # ------------------------------------------------
-# DATASET (HUGGINGFACE-BASED)
+# DATASET 
 # ------------------------------------------------
 class ColorizationDataset(Dataset):
     """
@@ -324,7 +323,6 @@ def compute_class_weights(split, pts_ab, max_batches=None):
 
 # ------------------------------------------------
 # TRAINING (CLASSIFICATION WITH REBALANCED CE)
-# Saves 1 train-sample image per epoch (no CSV / loss plots)
 # ------------------------------------------------
 def train_colorization_model_classification(
         model,
@@ -408,7 +406,7 @@ def train_colorization_model_classification(
 
 
 # ------------------------------------------------
-# INFERENCE ON SUBSET (PRETRAINED / FINETUNED)
+# INFERENCE ON SUBSET 
 # ------------------------------------------------
 def run_inference_on_subset(model, split, output_folder, indices=None, num_images=10):
     print(f"Running inference on HF split={split} → {output_folder}")
