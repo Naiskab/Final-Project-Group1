@@ -501,4 +501,4 @@ if __name__ == "__main__":
         num_images=10
     )
 
-    print("DONE. Check folders: pretrained_output/ and finetuned_output/")
+
