@@ -1,14 +1,14 @@
 # ================================================================
 # COLORIZATION OF GRAYSCALE IMAGES USING DEEP NEURAL NETWORKS
 # ECCV16-STYLE CLASSIFICATION FINE-TUNING (313 BINS + REBALANCED CE)
+# Uses HuggingFace "Elriggs/imagenet-50-subset" (no local data folders)
 # ================================================================
 
 import os
-import csv
 import urllib.request
 
 import numpy as np
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from skimage import color
 from tqdm import tqdm
 
@@ -18,21 +18,17 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from datasets import load_dataset
 
 # ------------------------------------------------
 # CONFIG
 # ------------------------------------------------
 IMAGE_SIZE = 256
 EPOCHS = 10                   # number of fine-tuning epochs
-LR = 0.00005                 # 5e-5 (fine-tuning learning rate)
+LR = 0.00005                  # 5e-5 (fine-tuning learning rate)
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-TRAIN_FOLDER = "imagenet_50/train"
-VAL_FOLDER = "imagenet_50/validation"
 FINETUNED_MODEL_PATH = "colorization_model_finetuned_ce.pth"
 
 PTS_IN_HULL_PATH = "pts_in_hull.npy"
@@ -62,18 +58,6 @@ class BaseColor(nn.Module):
 
     def unnormalize_ab(self, in_ab):
         return in_ab * self.ab_norm
-
-
-def load_img(img_path):
-    """
-    Safe image loader. Converts to RGB and returns numpy array.
-    """
-    try:
-        img = Image.open(img_path).convert("RGB")
-        return np.asarray(img)
-    except Exception as e:
-        print(f"[WARNING] load_img failed: {img_path} ({e})")
-        return None
 
 
 # ------------------------------------------------
@@ -193,47 +177,51 @@ def postprocess_tens(tens_orig_l, out_ab):
 
 
 # ------------------------------------------------
-# DATASET (SKIPS CORRUPT IMAGES)
+# DATASET (HUGGINGFACE-BASED)
 # ------------------------------------------------
 class ColorizationDataset(Dataset):
-    def __init__(self, folder_path, mode='inference'):
-        self.image_paths = []
+    """
+    HuggingFace-based dataset for ECCV16-style fine-tuning.
+    Loads images directly from: Elriggs/imagenet-50-subset
+    """
+    def __init__(self, split="train", mode="training"):
+        """
+        Args:
+            split: 'train' or 'validation'
+            mode: 'training' (returns L,ab) or 'inference' (returns L_resized, L_original, label)
+        """
         self.mode = mode
-
-        for fname in sorted(os.listdir(folder_path)):
-            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
-                path = os.path.join(folder_path, fname)
-                try:
-                    with Image.open(path) as img:
-                        img.verify()
-                    self.image_paths.append(path)
-                except (UnidentifiedImageError, OSError, ValueError) as e:
-                    print(f"[WARNING] Skipping corrupt image: {path} ({e})")
-
-        print(f"[INFO] Loaded {len(self.image_paths)} valid images from {folder_path} (mode={self.mode})")
+        self.hf_dataset = load_dataset("Elriggs/imagenet-50-subset", split=split)
+        print(f"[INFO] Loaded {len(self.hf_dataset)} images from HF split={split}, mode={mode}")
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.hf_dataset)
 
-    def __getitem__(self, index):
-        img_path = self.image_paths[index]
-        img_rgb_orig = load_img(img_path)
-        if img_rgb_orig is None:
-            raise RuntimeError(f"Unexpected None image at {img_path}")
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        img_pil = item["image"].convert("RGB")
+        img_rgb = np.array(img_pil)
 
-        if self.mode == 'training':
-            tens_l, tens_ab = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE), return_ab=True)
+        if self.mode == "training":
+            tens_l, tens_ab = preprocess_img(img_rgb, HW=(IMAGE_SIZE, IMAGE_SIZE), return_ab=True)
             return tens_l, tens_ab
 
-        tens_orig_l, tens_rs_l = preprocess_img(img_rgb_orig, HW=(IMAGE_SIZE, IMAGE_SIZE), return_ab=False)
-        return tens_rs_l, tens_orig_l, img_path
+        # inference mode
+        tens_orig_l, tens_rs_l = preprocess_img(img_rgb, HW=(IMAGE_SIZE, IMAGE_SIZE), return_ab=False)
+        label = item["label"]
+        return tens_rs_l, tens_orig_l, label
 
 
 def colorization_collate(batch):
+    """
+    Collate function for inference batches:
+    - stacks resized L (batchable)
+    - keeps original L and labels as lists
+    """
     tens_rs_l_batch = torch.stack([b[0] for b in batch], dim=0)
     tens_orig_l_list = [b[1] for b in batch]
-    img_paths = [b[2] for b in batch]
-    return tens_rs_l_batch, tens_orig_l_list, img_paths
+    labels = [b[2] for b in batch]
+    return tens_rs_l_batch, tens_orig_l_list, labels
 
 
 # ------------------------------------------------
@@ -299,9 +287,12 @@ def ab_to_q(ab, pts_ab):
     return q
 
 
-def compute_class_weights(data_folder, pts_ab, max_batches=None):
+def compute_class_weights(split, pts_ab, max_batches=None):
+    """
+    Compute class-rebalancing weights over the given HF split.
+    """
     print("Computing class-rebalancing weights over training data...")
-    dataset = ColorizationDataset(data_folder, mode='training')
+    dataset = ColorizationDataset(split=split, mode='training')
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     counts = torch.zeros(pts_ab.shape[0], dtype=torch.long)
@@ -333,26 +324,25 @@ def compute_class_weights(data_folder, pts_ab, max_batches=None):
 
 # ------------------------------------------------
 # TRAINING (CLASSIFICATION WITH REBALANCED CE)
-# + SAVE 1 TRAIN SAMPLE IMAGE PER EPOCH
+# Saves 1 train-sample image per epoch (no CSV / loss plots)
 # ------------------------------------------------
 def train_colorization_model_classification(
         model,
-        data_folder,
+        split,
         pts_ab,
         class_weights,
         epoch_sample_dir="finetune_train"
 ):
     print(f"Fine-tuning for {EPOCHS} epoch(s) with rebalanced CE...")
 
-    train_dataset = ColorizationDataset(data_folder, mode='training')
+    train_dataset = ColorizationDataset(split=split, mode='training')
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
-    epoch_losses = []
 
     # For saving 1 sample per epoch: take first image from TRAIN as inference
     os.makedirs(epoch_sample_dir, exist_ok=True)
-    train_infer_dataset = ColorizationDataset(data_folder, mode='inference')
+    train_infer_dataset = ColorizationDataset(split=split, mode='inference')
     sample_indices = [0]
     sample_subset = Subset(train_infer_dataset, sample_indices)
     sample_loader = DataLoader(sample_subset, batch_size=1, shuffle=False, collate_fn=colorization_collate)
@@ -391,7 +381,6 @@ def train_colorization_model_classification(
             pbar.set_postfix({"loss": loss.item()})
 
         epoch_loss = running_loss / max(num_batches, 1)
-        epoch_losses.append(epoch_loss)
         print(f"Epoch [{epoch+1}/{EPOCHS}] Loss: {epoch_loss:.6f}")
 
         # -----------------------------------------
@@ -399,7 +388,7 @@ def train_colorization_model_classification(
         # -----------------------------------------
         model.eval()
         with torch.no_grad():
-            for tens_rs_l, tens_orig_l, img_paths in sample_loader:
+            for tens_rs_l, tens_orig_l, labels in sample_loader:
                 tens_rs_l = tens_rs_l.to(DEVICE)
                 pred_ab = model(tens_rs_l)[0].cpu()
                 l_orig = tens_orig_l[0]
@@ -407,41 +396,25 @@ def train_colorization_model_classification(
 
                 epoch_folder = os.path.join(epoch_sample_dir, f"epoch_{epoch+1}")
                 os.makedirs(epoch_folder, exist_ok=True)
-                filename = os.path.basename(img_paths[0])
-                save_path = os.path.join(epoch_folder, f"epoch{epoch+1}_{filename}")
+                label = labels[0]
+                save_path = os.path.join(epoch_folder, f"epoch{epoch+1}_label{label}.png")
                 Image.fromarray((rgb * 255).astype(np.uint8)).save(save_path)
                 print(f"✓ Saved epoch {epoch+1} train sample → {save_path}")
                 break
         model.train()
 
-    # Save epoch losses to CSV + plot
-    with open("loss_log_ce.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "loss"])
-        for i, l in enumerate(epoch_losses, start=1):
-            writer.writerow([i, l])
-
-    plt.figure()
-    plt.plot(range(1, EPOCHS + 1), epoch_losses, marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Training Loss (Rebalanced CE)")
-    plt.title("Colorization Fine-tuning Loss (CE + Class Rebalancing)")
-    plt.grid(True)
-    plt.savefig("loss_plot_ce.png", bbox_inches="tight")
-    plt.close()
-
-    print("Saved loss_log_ce.csv and loss_plot_ce.png\n")
+    print("Finished fine-tuning.\n")
     return model
 
 
 # ------------------------------------------------
 # INFERENCE ON SUBSET (PRETRAINED / FINETUNED)
 # ------------------------------------------------
-def run_inference_on_subset(model, data_folder, output_folder, indices=None, num_images=10):
-    print(f"Running inference on {data_folder} → {output_folder}")
+def run_inference_on_subset(model, split, output_folder, indices=None, num_images=10):
+    print(f"Running inference on HF split={split} → {output_folder}")
     os.makedirs(output_folder, exist_ok=True)
 
-    full_dataset = ColorizationDataset(data_folder, mode='inference')
+    full_dataset = ColorizationDataset(split=split, mode='inference')
 
     if indices is not None:
         subset_indices = indices
@@ -458,21 +431,23 @@ def run_inference_on_subset(model, data_folder, output_folder, indices=None, num
     )
 
     model.eval()
+    img_counter = 0
     with torch.no_grad():
-        for tens_rs_l, tens_orig_l, img_paths in tqdm(loader, desc="Colorizing"):
+        for tens_rs_l, tens_orig_l, labels in tqdm(loader, desc="Colorizing"):
             tens_rs_l = tens_rs_l.to(DEVICE)
             pred_ab = model(tens_rs_l)
 
-            for i in range(len(img_paths)):
+            for i in range(len(labels)):
                 ab = pred_ab[i].cpu()
                 l_orig = tens_orig_l[i]
                 rgb = postprocess_tens(l_orig, ab)
 
-                filename = os.path.basename(img_paths[i])
-                save_path = os.path.join(output_folder, f"colorized_{filename}")
+                label = labels[i]
+                save_path = os.path.join(output_folder, f"img{img_counter:04d}_label{label}.png")
                 Image.fromarray((rgb * 255).astype(np.uint8)).save(save_path)
+                img_counter += 1
 
-    print(f"✓ Saved inference images → {output_folder}\n")
+    print(f"✓ Saved {img_counter} inference images → {output_folder}\n")
 
 
 # ------------------------------------------------
@@ -480,31 +455,34 @@ def run_inference_on_subset(model, data_folder, output_folder, indices=None, num
 # ------------------------------------------------
 if __name__ == "__main__":
 
+    # Fixed subset of indices for qualitative comparison
     FIXED_10 = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+
+    TRAIN_SPLIT = "train"
 
     # 1) Load 313-bin ab cluster centers
     pts_ab = ensure_pts_in_hull()
 
-    # 2) PRETRAINED ECCV16 MODEL → INFERENCE ONLY
+    # 2) PRETRAINED ECCV16 MODEL → INFERENCE ONLY (BASELINE)
     pretrained_model = define_colorization_model(pretrained=True)
     run_inference_on_subset(
         pretrained_model,
-        TRAIN_FOLDER,
+        split=TRAIN_SPLIT,
         output_folder="pretrained_output",
         indices=FIXED_10,
         num_images=10
     )
 
     # 3) Compute class-rebalancing weights over training set
-    class_weights = compute_class_weights(TRAIN_FOLDER, pts_ab, max_batches=None)
+    class_weights = compute_class_weights(split=TRAIN_SPLIT, pts_ab=pts_ab, max_batches=None)
 
-    # 4) Fine-tune with classification + rebalanced CE + save 1 image per epoch
+    # 4) Fine-tune PRETRAINED model with classification + rebalanced CE
     finetuned_model = define_colorization_model(pretrained=True)
     finetuned_model = train_colorization_model_classification(
         finetuned_model,
-        TRAIN_FOLDER,
-        pts_ab,
-        class_weights,
+        split=TRAIN_SPLIT,
+        pts_ab=pts_ab,
+        class_weights=class_weights,
         epoch_sample_dir="finetune_train"
     )
 
@@ -512,15 +490,17 @@ if __name__ == "__main__":
     torch.save(finetuned_model.state_dict(), FINETUNED_MODEL_PATH)
     print(f"Saved fine-tuned model → {FINETUNED_MODEL_PATH}\n")
 
-    # 6) Reload and run inference on same subset for comparison
+    # 6) Reload fine-tuned weights into fresh model (no pretrained) and run inference
     finetuned_model_reloaded = define_colorization_model(pretrained=False)
     finetuned_model_reloaded.load_state_dict(torch.load(FINETUNED_MODEL_PATH, map_location=DEVICE))
     finetuned_model_reloaded.to(DEVICE)
 
     run_inference_on_subset(
         finetuned_model_reloaded,
-        TRAIN_FOLDER,
+        split=TRAIN_SPLIT,
         output_folder="finetuned_output",
         indices=FIXED_10,
         num_images=10
     )
+
+    print("DONE. Check folders: pretrained_output/ and finetuned_output/")
