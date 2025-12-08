@@ -1,5 +1,6 @@
 # ================================================================
 # COLORIZATION OF GRAYSCALE IMAGES USING DEEP NEURAL NETWORKS
+# ENHANCED WITH GENERATIVE ADVERSARIAL NETWORKS (GANs)
 # ================================================================
 
 import os
@@ -753,7 +754,7 @@ if __name__ == "__main__":
     print("STARTING GAN TRAINING")
     trained_gen, trained_disc = train_gan(
         generator=generator,
-        data_folder="Data/imagenet_50",
+        data_folder="train",
         pretrained_path="colorization_model.pth",
         save_interval=5
     )
