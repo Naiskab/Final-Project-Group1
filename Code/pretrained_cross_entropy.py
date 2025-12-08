@@ -28,7 +28,7 @@ LR = 0.00005                  # 5e-5 (fine-tuning learning rate)
 BATCH_SIZE = 16
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-FINETUNED_MODEL_PATH = "colorization_model_finetuned_ce.pth"
+FINETUNED_MODEL_PATH = "colorization_model.pth"
 
 PTS_IN_HULL_PATH = "pts_in_hull.npy"
 PTS_IN_HULL_URLS = [
