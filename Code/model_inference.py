@@ -162,7 +162,7 @@ def evaluate_single_model(
 
 
 def evaluate_both_models(
-    gan_weights_path="gan_generator_epoch_50.pth",
+    gan_weights_path="best_gan_generator.pth.pth",
     split="validation",         
     batch_size=None,
     max_batches=None,
@@ -258,7 +258,7 @@ def evaluate_both_models(
 
 if __name__ == "__main__":
     results = evaluate_both_models(
-        gan_weights_path="gan_generator_epoch_50.pth",
+        gan_weights_path="best_gan_generator.pth.pth",
         split="validation",   
         batch_size=16,
         max_batches=None,    
