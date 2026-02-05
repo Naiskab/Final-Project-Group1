@@ -1,4 +1,4 @@
-# Final-Project-Group1: Colorization of grayscale images using Deep Neural Networks
+# Colorization of grayscale images using Deep Neural Networks
 
 This repository contains the implementation and evaluation of grayscale image colorization using deep learning. The project extends the ECCV-2016 colorization model by integrating adversarial learning and perceptual loss, with the goal of improving perceptual realism in generated color outputs. Experiments compare a pretrained model against a fine-tuned adversarial model.
 
